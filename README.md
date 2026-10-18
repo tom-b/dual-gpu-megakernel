@@ -1,5 +1,10 @@
 # Qwen3.8-27B megakernel on two GPUs
 
+Modified to run on two RTX 2000 Ada cards. Build with make ARCH=sm_89. On my test, doubled token generation speed to 50 tokens/sec
+on agentic test that had to read about 20K of context from source and markdown files.
+
+Everything below is the same test as the original fork.
+
 A two-GPU fork of the Qwen3.8-27B CUDA megakernel by **L-Forster**, from [open-jet](https://github.com/L-Forster/open-jet) (`megakernel/`). The megakernel itself is their work: one persistent kernel launch per speculative-decoding cycle (main model, verification, MTP drafting), the batched prefill kernels, the OpenAI-compatible server, the benchmarks and the quality tooling. On one RTX 3090 it already runs 1.4-1.9x faster than llama.cpp.
 
 **This fork splits it tensor-parallel across two GPUs.** On two RTX 3090s it decodes at 164 tok/s, 1.64x llama.cpp's best two-GPU setup on the same cards, with the same output quality, over plain PCIe (no NVLink). It also loads Q4_K / Q5_K / Q6_K / Q8_0 weights in any per-tensor mix.
