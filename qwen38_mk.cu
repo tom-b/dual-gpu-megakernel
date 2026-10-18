@@ -1208,8 +1208,8 @@ __device__ __noinline__ void dn_proj(const LayerW & W, int dl, int n, int dn_c, 
                        [=](int r, const float (&a)[2][T], int nr) { store_pair_t<T>(cB.z, VD_L, r, a, nr); });
     // Warm L2 with what dn_core will read, while the other blocks are still projecting:
     // the head's recurrent state (64 KB), its conv weights, older conv rows and replay entries.
-    if (blockIdx.x < NVH_L) {
-        const int h = blockIdx.x, kh = h % NKH_L, tid = threadIdx.x;
+    for (int h = blockIdx.x; h < NVH_L; h += gridDim.x) { // grid-strided: gridDim.x may be < NVH_L (fewer SMs than heads)
+        const int kh = h % NKH_L, tid = threadIdx.x;
         pf_l2(cB.dstate + ((size_t) dl * NVH_L + h) * 128 * 128 + tid * 32);
         if (tid == 0) {
             pf_l2(W.dt + (h & ~31));
@@ -1235,13 +1235,11 @@ __device__ __noinline__ void dn_proj(const LayerW & W, int dl, int n, int dn_c, 
     }
 }
 
-// delta-net core: one block per value head (48 blocks).  conv1d+silu, l2-norm, gated delta
+// delta-net core for one value head h.  conv1d+silu, l2-norm, gated delta
 // rule (with replay of pending accepted tokens), gated rms-norm, quantise for ssm_out.
 template <int T>
-__device__ __noinline__ void dn_core(const LayerW & W, int dl, int n, int dn_c, int n_commit, uint8_t * /*sm*/) {
+__device__ __noinline__ void dn_head(const LayerW & W, int dl, int n, int dn_c, int n_commit, int h) {
     uint8_t * const sm = smem;
-    const int h = blockIdx.x;
-    if (h >= NVH_L) return;
     const int kh = h % NKH_L;
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
     // thread owns state column `col`, rows [32 r, 32 r + 32)  (S stored as [col][row])
@@ -1378,6 +1376,17 @@ __device__ __noinline__ void dn_core(const LayerW & W, int dl, int n, int dn_c, 
         const int c = jb * 32 + lane;
         const float y = s_o[t * 128 + c] * rs * W.snorm[c] * silu(s_z[t * 128 + c]);
         q32_store(cB.qo, t, 4 * h + jb, y, 0.f, false);
+    }
+}
+
+// One block per value head when the grid has at least NVH_L blocks (82-SM RTX 3090: one head per block, one
+// pass).  With fewer blocks than heads (e.g. 22-SM RTX 2000 Ada, NVH_L = 24) the heads are strided over the
+// grid; heads touch disjoint global state, so only the shared memory has to be fenced between passes.
+template <int T>
+__device__ __noinline__ void dn_core(const LayerW & W, int dl, int n, int dn_c, int n_commit, uint8_t * /*sm*/) {
+    for (int h = blockIdx.x; h < NVH_L; h += gridDim.x) {
+        if (h != (int) blockIdx.x) __syncthreads(); // previous head's shared-memory tiles are fully consumed
+        dn_head<T>(W, dl, n, dn_c, n_commit, h);
     }
 }
 
